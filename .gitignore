@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+
+# Model Files and Weights (Large files)
+model_files/
+*.pt
+*.bin
+*.safetensors
+*.pth
+student_model_int4/
+
+# Logs
+*.log
+runs/
+
+# IDE
+.vscode/
+.idea/

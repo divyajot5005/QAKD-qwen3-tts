@@ -1,0 +1,13 @@
+torch
+transformers
+accelerate
+bitsandbytes
+scipy
+datasets
+soundfile
+librosa
+tensorboard
+huggingface_hub
+tiktoken
+sentencepiece
+protobuf
