@@ -43,22 +43,46 @@ def train_distill(teacher_model, student_model, dataloader, optimizer, device, e
             input_ids_gpu = input_ids_cpu.to(device)
             attention_mask_gpu = attention_mask_cpu.to(device)
             
-            # Prepare dummy past_hidden (Audio Prompt Context)
-            # The model requires this even for text training.
-            # Shape: (batch_size, seq_len, hidden_size)
+            # Prepare dummy past_hidden
             batch_size = input_ids_gpu.shape[0]
             hidden_size = teacher_model.config.hidden_size
             dtype = teacher_model.dtype
             
-            # Use a specialized dummy token/embedding or just zeros
             # Using zeros acts as a "neutral" prompt
-            # Note: We use size 1 for the prompt sequence length
             dummy_past_hidden = torch.zeros(batch_size, 1, hidden_size, device=device, dtype=dtype)
+
+            # --- MANUALLY EMBED TEXT INPUTS ---
+            # The model default forward(...) maps input_ids -> codec_embedding (Audio Codes).
+            # We must map input_ids -> text_embedding manually to use Text.
+            
+            # Locate text_embedding module (usually talker.model.text_embedding)
+            # Inspection showed: model.text_embedding
+            if hasattr(teacher_model, "model") and hasattr(teacher_model.model, "text_embedding"):
+                text_embed_layer = teacher_model.model.text_embedding
+            elif hasattr(teacher_model, "text_embedding"):
+                text_embed_layer = teacher_model.text_embedding
+            else:
+                raise AttributeError("Could not find text_embedding layer in teacher model")
+                
+            # Embed inputs (No Gen, just embeddings)
+            with torch.no_grad():
+                inputs_embeds_teacher = text_embed_layer(input_ids_gpu)
+            
+            # For Student, we assume same structure or share weights logic
+            # If student is INT4, we must use its own embedding layer (which might be FP16 still)
+            if hasattr(student_model, "model") and hasattr(student_model.model, "text_embedding"):
+                student_embed_layer = student_model.model.text_embedding
+            elif hasattr(student_model, "text_embedding"):
+                student_embed_layer = student_model.text_embedding
+            else:
+                student_embed_layer = text_embed_layer # Fallback? No, student has its own parameters.
+                
+            inputs_embeds_student = student_embed_layer(input_ids_gpu)
 
             # 1. Teacher Forward (GPU)
             with torch.no_grad():
                 teacher_outputs = teacher_model(
-                    input_ids=input_ids_gpu, 
+                    inputs_embeds=inputs_embeds_teacher, 
                     attention_mask=attention_mask_gpu,
                     past_hidden=dummy_past_hidden
                 )
@@ -70,7 +94,7 @@ def train_distill(teacher_model, student_model, dataloader, optimizer, device, e
 
             # 2. Student Forward (GPU)
             student_outputs = student_model(
-                input_ids=input_ids_gpu, 
+                inputs_embeds=inputs_embeds_student, 
                 attention_mask=attention_mask_gpu,
                 past_hidden=dummy_past_hidden
             )
