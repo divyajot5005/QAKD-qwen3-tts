@@ -24,10 +24,19 @@ def distillation_loss(student_logits, teacher_logits, temperature=2.0):
     soft_prob = F.log_softmax(student_logits / temperature, dim=-1)
     return F.kl_div(soft_prob, soft_targets, reduction='batchmean') * (temperature ** 2)
 
-def train_distill(teacher_model, student_model, dataloader, optimizer, device, epochs=1):
-    # Teacher and Student on GPU
-    teacher_model.eval()
-    student_model.train()
+def train_distill(teacher_wrapper, student_wrapper, dataloader, optimizer, device, epochs=1):
+    # Handle Wrappers vs Modules
+    # Teacher
+    if hasattr(teacher_wrapper, "eval"):
+        teacher_wrapper.eval()
+    elif hasattr(teacher_wrapper, "model"):
+        teacher_wrapper.model.eval()
+        
+    # Student
+    if hasattr(student_wrapper, "train"):
+        student_wrapper.train()
+    elif hasattr(student_wrapper, "model"):
+        student_wrapper.model.train()
     
     print("Starting Distillation (H100 Optimization)...")
     for epoch in range(epochs):
@@ -43,27 +52,17 @@ def train_distill(teacher_model, student_model, dataloader, optimizer, device, e
             input_ids_gpu = input_ids_cpu.to(device)
             attention_mask_gpu = attention_mask_cpu.to(device)
             
-            # 1. Teacher Forward (GPU)
+                # 1. Teacher Forward (GPU)
             with torch.no_grad():
-                # Note: Qwen3TTS inner model might return a tuple or specialized output
-                # We usually expect CausalLMOutputWithPast or similar
-                # Using directly the batch dict if signature matches, but explicit args is safer if we knew them
-                # The error was "unexpected keyword argument 'input_ids'"
-                # usage: model(input_ids=..., attention_mask=...)
-                
-                # If teacher_model was unwrapped incorrectly, it might be the issue.
-                # If teacher_model IS the correct model, it should accept input_ids.
-                
-                teacher_outputs = teacher_model(input_ids=input_ids_gpu, attention_mask=attention_mask_gpu)
+                teacher_outputs = teacher_wrapper(input_ids=input_ids_gpu, attention_mask=attention_mask_gpu)
                 
                 if hasattr(teacher_outputs, 'logits'):
                     teacher_logits = teacher_outputs.logits.to(device)
                 else:
-                    # Fallback if output is tuple (logits are usually 0th element)
                     teacher_logits = teacher_outputs[0].to(device)
 
             # 2. Student Forward (GPU)
-            student_outputs = student_model(input_ids=input_ids_gpu, attention_mask=attention_mask_gpu)
+            student_outputs = student_wrapper(input_ids=input_ids_gpu, attention_mask=attention_mask_gpu)
             if hasattr(student_outputs, 'logits'):
                 student_logits = student_outputs.logits
             else:
@@ -86,7 +85,12 @@ def train_distill(teacher_model, student_model, dataloader, optimizer, device, e
         avg_loss = total_loss / len(dataloader)
         print(f"Average Loss: {avg_loss:.4f}")
         
-        torch.save(student_model.state_dict(), f"qwen3_tts_int4_ep{epoch}.pt")
+        if hasattr(student_wrapper, "state_dict"):
+            state_dict = student_wrapper.state_dict()
+        else:
+            state_dict = student_wrapper.model.state_dict()
+            
+        torch.save(state_dict, f"qwen3_tts_int4_ep{epoch}.pt")
 
 def main():
     # 6GB VRAM Optimization Config
