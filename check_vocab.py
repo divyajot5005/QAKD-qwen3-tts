@@ -17,10 +17,9 @@ def check_vocab():
     print(f"Tokenizer vocab size: {tokenizer.vocab_size}")
     print(f"Tokenizer len: {len(tokenizer)}")
     
-    print("\nLoading model config...")
-    # Try to load config from talker if possible, or wrapper
-    config = AutoConfig.from_pretrained(MODEL_PATH, trust_remote_code=True)
-    print(f"Config vocab size: {getattr(config, 'vocab_size', 'Unknown')}")
+    print("\nLoading model config (skipped AutoConfig)...")
+    # config = AutoConfig.from_pretrained(MODEL_PATH, trust_remote_code=True)
+    # print(f"Config vocab size: {getattr(config, 'vocab_size', 'Unknown')}")
     
     # helper function to drill down to the LLM backbone
     def get_talker(path, **kwargs):
