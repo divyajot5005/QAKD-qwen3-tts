@@ -24,7 +24,7 @@ def distillation_loss(student_logits, teacher_logits, temperature=2.0):
     soft_prob = F.log_softmax(student_logits / temperature, dim=-1)
     return F.kl_div(soft_prob, soft_targets, reduction='batchmean') * (temperature ** 2)
 
-def train_distill(teacher_model, student_model, dataloader, optimizer, device, epochs=1):
+def train_distill(teacher_model, student_model, dataloader, optimizer, device, epochs=5):
     # Teacher and Student are standard nn.Module (Talkers)
     teacher_model.eval()
     student_model.train()
@@ -184,7 +184,8 @@ def main():
 
     # 3. Load Calibration Dataset
     print("Loading Dataset...")
-    dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="train[:500]") 
+    # Use full training split
+    dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="train") 
     
     def tokenize_function(examples):
         return tokenizer(examples["text"], truncation=True, max_length=256, padding="max_length")
