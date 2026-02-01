@@ -24,19 +24,10 @@ def distillation_loss(student_logits, teacher_logits, temperature=2.0):
     soft_prob = F.log_softmax(student_logits / temperature, dim=-1)
     return F.kl_div(soft_prob, soft_targets, reduction='batchmean') * (temperature ** 2)
 
-def train_distill(teacher_wrapper, student_wrapper, dataloader, optimizer, device, epochs=1):
-    # Handle Wrappers vs Modules
-    # Teacher
-    if hasattr(teacher_wrapper, "eval"):
-        teacher_wrapper.eval()
-    elif hasattr(teacher_wrapper, "model"):
-        teacher_wrapper.model.eval()
-        
-    # Student
-    if hasattr(student_wrapper, "train"):
-        student_wrapper.train()
-    elif hasattr(student_wrapper, "model"):
-        student_wrapper.model.train()
+def train_distill(teacher_model, student_model, dataloader, optimizer, device, epochs=1):
+    # Teacher and Student are standard nn.Module (Talkers)
+    teacher_model.eval()
+    student_model.train()
     
     print("Starting Distillation (H100 Optimization)...")
     for epoch in range(epochs):
@@ -52,17 +43,17 @@ def train_distill(teacher_wrapper, student_wrapper, dataloader, optimizer, devic
             input_ids_gpu = input_ids_cpu.to(device)
             attention_mask_gpu = attention_mask_cpu.to(device)
             
-                # 1. Teacher Forward (GPU)
+            # 1. Teacher Forward (GPU)
             with torch.no_grad():
-                teacher_outputs = teacher_wrapper(input_ids=input_ids_gpu, attention_mask=attention_mask_gpu)
+                teacher_outputs = teacher_model(input_ids=input_ids_gpu, attention_mask=attention_mask_gpu)
                 
                 if hasattr(teacher_outputs, 'logits'):
-                    teacher_logits = teacher_outputs.logits.to(device)
+                    teacher_logits = teacher_outputs.logits
                 else:
-                    teacher_logits = teacher_outputs[0].to(device)
+                    teacher_logits = teacher_outputs[0]
 
             # 2. Student Forward (GPU)
-            student_outputs = student_wrapper(input_ids=input_ids_gpu, attention_mask=attention_mask_gpu)
+            student_outputs = student_model(input_ids=input_ids_gpu, attention_mask=attention_mask_gpu)
             if hasattr(student_outputs, 'logits'):
                 student_logits = student_outputs.logits
             else:
@@ -85,10 +76,10 @@ def train_distill(teacher_wrapper, student_wrapper, dataloader, optimizer, devic
         avg_loss = total_loss / len(dataloader)
         print(f"Average Loss: {avg_loss:.4f}")
         
-        if hasattr(student_wrapper, "state_dict"):
-            state_dict = student_wrapper.state_dict()
+        if hasattr(student_model, "state_dict"):
+            state_dict = student_model.state_dict()
         else:
-            state_dict = student_wrapper.model.state_dict()
+            state_dict = student_model.model.state_dict()
             
         torch.save(state_dict, f"qwen3_tts_int4_ep{epoch}.pt")
 
@@ -106,9 +97,24 @@ def main():
     # 1. Load Teacher Model (GPU)
     print("Loading Teacher Model (GPU)...")
     model_kwargs = {"device_map": DEVICE, "trust_remote_code": True, "torch_dtype": torch.float16}
-    teacher_wrapper = ModelClass.from_pretrained(MODEL_PATH, **model_kwargs)
-    print(f"Teacher wrapper type: {type(teacher_wrapper)}")
-    # We use the wrapper for forward passes
+    
+    # helper function to drill down to the LLM backbone
+    def get_talker(path, **kwargs):
+        wrapper = ModelClass.from_pretrained(path, **kwargs)
+        # Hierarchy: Qwen3TTSModel (Wrapper) -> Qwen3TTSForConditionalGeneration (.model) -> Talker (.talker)
+        if hasattr(wrapper, "model") and hasattr(wrapper.model, "talker"):
+            return wrapper.model.talker
+        elif hasattr(wrapper, "talker"):
+            return wrapper.talker
+        else:
+            # Fallback or maybe wrapper.model IS the talker?
+            print(f"Structure lookup failed. Wrapper keys: {dir(wrapper)}")
+            if hasattr(wrapper, "model"):
+                 print(f"Inner keys: {dir(wrapper.model)}")
+            return wrapper.model
+
+    teacher_model = get_talker(MODEL_PATH, **model_kwargs)
+    print(f"Teacher Backbone type: {type(teacher_model)}")
     
     tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH, trust_remote_code=True)
     if tokenizer.pad_token is None:
@@ -116,31 +122,20 @@ def main():
 
     # 2. Prepare Student Model
     print("Creating Student Model (INT4 on GPU)...")
-    student_wrapper = ModelClass.from_pretrained(MODEL_PATH, **model_kwargs)
+    student_model = get_talker(MODEL_PATH, **model_kwargs)
+    print(f"Student Backbone type: {type(student_model)}")
     
-    # helper to access inner module
-    if hasattr(student_wrapper, "model"):
-        student_inner = student_wrapper.model
-    else:
-        # Fallback if .model doesn't exist (inspect to be sure)
-        print(f"DEBUG: Attributes of wrapper: {dir(student_wrapper)}")
-        # Try to guess - maybe it IS the module?
-        # But user reported 'no attribute to', so it's not a module.
-        # Let's assume .model exists based on previous code.
-        student_inner = student_wrapper.model 
-        
-    student_inner.to(dtype=torch.float16) # Half precision
+    student_model.to(dtype=torch.float16) # Half precision
     
-    replace_linear_layers(student_inner, quantized_class=QuantizedLinearINT4)
+    replace_linear_layers(student_model, quantized_class=QuantizedLinearINT4)
     
-    # Move Student to GPU (if not already handled by device_map)
-    # student_wrapper usually manages device, but we can ensure inner is right
-    student_inner.to(DEVICE)
+    # Move Student to GPU
+    student_model.to(DEVICE)
     
     # Enable Gradient Checkpointing (Saves VRAM)
-    if hasattr(student_inner, "gradient_checkpointing_enable"):
+    if hasattr(student_model, "gradient_checkpointing_enable"):
         print("Enabling Gradient Checkpointing...")
-        student_inner.gradient_checkpointing_enable()
+        student_model.gradient_checkpointing_enable()
 
     # 3. Load Calibration Dataset
     print("Loading Dataset...")
@@ -158,11 +153,11 @@ def main():
     # 4. Optimizer - Use 8-bit Adam via bitsandbytes
     import bitsandbytes as bnb
     print("Using 8-bit AdamW...")
-    optimizer = bnb.optim.AdamW8bit(student_inner.parameters(), lr=1e-5)
+    optimizer = bnb.optim.AdamW8bit(student_model.parameters(), lr=1e-5)
     
     # 5. Run
-    # Pass WRAPPERS to training loop for forward calls
-    train_distill(teacher_wrapper, student_wrapper, dataloader, optimizer, DEVICE, epochs=1)
+    # Pass inner models (talkers) to training loop
+    train_distill(teacher_model, student_model, dataloader, optimizer, DEVICE, epochs=1)
 
 if __name__ == "__main__":
     main()
