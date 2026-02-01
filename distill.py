@@ -25,11 +25,11 @@ def distillation_loss(student_logits, teacher_logits, temperature=2.0):
     return F.kl_div(soft_prob, soft_targets, reduction='batchmean') * (temperature ** 2)
 
 def train_distill(teacher_model, student_model, dataloader, optimizer, device, epochs=1):
-    # Teacher is on CPU, Student is on GPU
+    # Teacher and Student on GPU
     teacher_model.eval()
     student_model.train()
     
-    print("Starting Distillation (Low VRAM Mode)...")
+    print("Starting Distillation (H100 Optimization)...")
     for epoch in range(epochs):
         print(f"Epoch {epoch+1}/{epochs}")
         total_loss = 0
@@ -43,11 +43,18 @@ def train_distill(teacher_model, student_model, dataloader, optimizer, device, e
             input_ids_gpu = input_ids_cpu.to(device)
             attention_mask_gpu = attention_mask_cpu.to(device)
             
-            # 1. Teacher Forward (CPU)
+            # 1. Teacher Forward (GPU)
             with torch.no_grad():
                 # Note: Qwen3TTS inner model might return a tuple or specialized output
                 # We usually expect CausalLMOutputWithPast or similar
-                teacher_outputs = teacher_model(input_ids=input_ids_cpu, attention_mask=attention_mask_cpu)
+                # Using directly the batch dict if signature matches, but explicit args is safer if we knew them
+                # The error was "unexpected keyword argument 'input_ids'"
+                # usage: model(input_ids=..., attention_mask=...)
+                
+                # If teacher_model was unwrapped incorrectly, it might be the issue.
+                # If teacher_model IS the correct model, it should accept input_ids.
+                
+                teacher_outputs = teacher_model(input_ids=input_ids_gpu, attention_mask=attention_mask_gpu)
                 
                 if hasattr(teacher_outputs, 'logits'):
                     teacher_logits = teacher_outputs.logits.to(device)
@@ -92,10 +99,14 @@ def main():
         print("Model not found. Run download_model.py")
         return
 
-    # 1. Load Teacher Model (CPU ONLY)
-    print("Loading Teacher Model (CPU)...")
-    teacher_wrapper = ModelClass.from_pretrained(MODEL_PATH, device_map="cpu", trust_remote_code=True)
-    teacher_model = teacher_wrapper.model # Unwrap
+    # 1. Load Teacher Model (GPU)
+    print("Loading Teacher Model (GPU)...")
+    model_kwargs = {"device_map": DEVICE, "trust_remote_code": True, "torch_dtype": torch.float16}
+    teacher_model = ModelClass.from_pretrained(MODEL_PATH, **model_kwargs)
+    # Note: We do NOT unwrap with .model because ModelClass is likely the main model or handles forward() correctly
+    # If the user's error says 'unexpected keyword argument input_ids', checking the wrapper might be needed.
+    # However, usually the output of from_pretrained IS the model we want to run.
+    print(f"Teacher type: {type(teacher_model)}")
     
     tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH, trust_remote_code=True)
     if tokenizer.pad_token is None:
@@ -103,8 +114,12 @@ def main():
 
     # 2. Prepare Student Model
     print("Creating Student Model (INT4 on GPU)...")
-    student_wrapper = ModelClass.from_pretrained(MODEL_PATH, device_map="cpu", trust_remote_code=True)
-    student_model = student_wrapper.model # Unwrap
+    student_model = ModelClass.from_pretrained(MODEL_PATH, **model_kwargs)
+    
+    # Unwrap only if necessary for replacing layers (usually replace_linear_layers handles recursion)
+    # But for training, we want the full model structure
+    
+    print(f"Student type: {type(student_model)}")
     
     student_model.to(dtype=torch.float16) # Half precision
     
@@ -128,7 +143,8 @@ def main():
     tokenized_datasets = dataset.map(tokenize_function, batched=True, remove_columns=["text"])
     tokenized_datasets.set_format(type="torch", columns=["input_ids", "attention_mask"])
     
-    dataloader = DataLoader(tokenized_datasets, batch_size=1, shuffle=True) 
+    # H100 has 80GB, so we can use a larger batch size
+    dataloader = DataLoader(tokenized_datasets, batch_size=16, shuffle=True) 
     
     # 4. Optimizer - Use 8-bit Adam via bitsandbytes
     import bitsandbytes as bnb
