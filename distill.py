@@ -102,11 +102,9 @@ def main():
     # 1. Load Teacher Model (GPU)
     print("Loading Teacher Model (GPU)...")
     model_kwargs = {"device_map": DEVICE, "trust_remote_code": True, "torch_dtype": torch.float16}
-    teacher_model = ModelClass.from_pretrained(MODEL_PATH, **model_kwargs)
-    # Note: We do NOT unwrap with .model because ModelClass is likely the main model or handles forward() correctly
-    # If the user's error says 'unexpected keyword argument input_ids', checking the wrapper might be needed.
-    # However, usually the output of from_pretrained IS the model we want to run.
-    print(f"Teacher type: {type(teacher_model)}")
+    teacher_wrapper = ModelClass.from_pretrained(MODEL_PATH, **model_kwargs)
+    print(f"Teacher wrapper type: {type(teacher_wrapper)}")
+    # We use the wrapper for forward passes
     
     tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH, trust_remote_code=True)
     if tokenizer.pad_token is None:
@@ -114,24 +112,31 @@ def main():
 
     # 2. Prepare Student Model
     print("Creating Student Model (INT4 on GPU)...")
-    student_model = ModelClass.from_pretrained(MODEL_PATH, **model_kwargs)
+    student_wrapper = ModelClass.from_pretrained(MODEL_PATH, **model_kwargs)
     
-    # Unwrap only if necessary for replacing layers (usually replace_linear_layers handles recursion)
-    # But for training, we want the full model structure
+    # helper to access inner module
+    if hasattr(student_wrapper, "model"):
+        student_inner = student_wrapper.model
+    else:
+        # Fallback if .model doesn't exist (inspect to be sure)
+        print(f"DEBUG: Attributes of wrapper: {dir(student_wrapper)}")
+        # Try to guess - maybe it IS the module?
+        # But user reported 'no attribute to', so it's not a module.
+        # Let's assume .model exists based on previous code.
+        student_inner = student_wrapper.model 
+        
+    student_inner.to(dtype=torch.float16) # Half precision
     
-    print(f"Student type: {type(student_model)}")
+    replace_linear_layers(student_inner, quantized_class=QuantizedLinearINT4)
     
-    student_model.to(dtype=torch.float16) # Half precision
-    
-    replace_linear_layers(student_model, quantized_class=QuantizedLinearINT4)
-    
-    # Move Student to GPU
-    student_model.to(DEVICE)
+    # Move Student to GPU (if not already handled by device_map)
+    # student_wrapper usually manages device, but we can ensure inner is right
+    student_inner.to(DEVICE)
     
     # Enable Gradient Checkpointing (Saves VRAM)
-    if hasattr(student_model, "gradient_checkpointing_enable"):
+    if hasattr(student_inner, "gradient_checkpointing_enable"):
         print("Enabling Gradient Checkpointing...")
-        student_model.gradient_checkpointing_enable()
+        student_inner.gradient_checkpointing_enable()
 
     # 3. Load Calibration Dataset
     print("Loading Dataset...")
@@ -149,10 +154,11 @@ def main():
     # 4. Optimizer - Use 8-bit Adam via bitsandbytes
     import bitsandbytes as bnb
     print("Using 8-bit AdamW...")
-    optimizer = bnb.optim.AdamW8bit(student_model.parameters(), lr=1e-5)
+    optimizer = bnb.optim.AdamW8bit(student_inner.parameters(), lr=1e-5)
     
     # 5. Run
-    train_distill(teacher_model, student_model, dataloader, optimizer, DEVICE, epochs=1)
+    # Pass WRAPPERS to training loop for forward calls
+    train_distill(teacher_wrapper, student_wrapper, dataloader, optimizer, DEVICE, epochs=1)
 
 if __name__ == "__main__":
     main()
