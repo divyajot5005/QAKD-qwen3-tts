@@ -43,9 +43,25 @@ def train_distill(teacher_model, student_model, dataloader, optimizer, device, e
             input_ids_gpu = input_ids_cpu.to(device)
             attention_mask_gpu = attention_mask_cpu.to(device)
             
+            # Prepare dummy past_hidden (Audio Prompt Context)
+            # The model requires this even for text training.
+            # Shape: (batch_size, seq_len, hidden_size)
+            batch_size = input_ids_gpu.shape[0]
+            hidden_size = teacher_model.config.hidden_size
+            dtype = teacher_model.dtype
+            
+            # Use a specialized dummy token/embedding or just zeros
+            # Using zeros acts as a "neutral" prompt
+            # Note: We use size 1 for the prompt sequence length
+            dummy_past_hidden = torch.zeros(batch_size, 1, hidden_size, device=device, dtype=dtype)
+
             # 1. Teacher Forward (GPU)
             with torch.no_grad():
-                teacher_outputs = teacher_model(input_ids=input_ids_gpu, attention_mask=attention_mask_gpu)
+                teacher_outputs = teacher_model(
+                    input_ids=input_ids_gpu, 
+                    attention_mask=attention_mask_gpu,
+                    past_hidden=dummy_past_hidden
+                )
                 
                 if hasattr(teacher_outputs, 'logits'):
                     teacher_logits = teacher_outputs.logits
@@ -53,7 +69,12 @@ def train_distill(teacher_model, student_model, dataloader, optimizer, device, e
                     teacher_logits = teacher_outputs[0]
 
             # 2. Student Forward (GPU)
-            student_outputs = student_model(input_ids=input_ids_gpu, attention_mask=attention_mask_gpu)
+            student_outputs = student_model(
+                input_ids=input_ids_gpu, 
+                attention_mask=attention_mask_gpu,
+                past_hidden=dummy_past_hidden
+            )
+            
             if hasattr(student_outputs, 'logits'):
                 student_logits = student_outputs.logits
             else:
