@@ -190,7 +190,7 @@ def main():
     def tokenize_function(examples):
         return tokenizer(examples["text"], truncation=True, max_length=256, padding="max_length")
 
-    tokenized_datasets = dataset.map(tokenize_function, batched=True, remove_columns=["text"])
+    tokenized_datasets = dataset.map(tokenize_function, batched=True, remove_columns=["text"], load_from_cache_file=False)
     tokenized_datasets.set_format(type="torch", columns=["input_ids", "attention_mask"])
     
     # H100 has 80GB, so we can use a larger batch size
@@ -203,7 +203,7 @@ def main():
     
     # 5. Run
     # Pass inner models (talkers) to training loop
-    train_distill(teacher_model, student_model, dataloader, optimizer, DEVICE, epochs=1)
+    train_distill(teacher_model, student_model, dataloader, optimizer, DEVICE, epochs=5)
 
 if __name__ == "__main__":
     main()
