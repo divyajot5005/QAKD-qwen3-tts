@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 from quant_layers import QuantizedLinearINT4
 
-def replace_linear_layers(model, target_class=nn.Linear, quantized_class=QuantizedLinearINT4, allowed_names=None, ignored_names=None):
+def replace_linear_layers(model, target_class=nn.Linear, quantized_class=QuantizedLinearINT4, allowed_names=None, ignored_names=None, device=None):
     """
     Recursively replaces all instances of target_class with quantized_class in the model.
     """
@@ -25,11 +25,15 @@ def replace_linear_layers(model, target_class=nn.Linear, quantized_class=Quantiz
             print(f"Quantizing layer: {name}")
             quantized_layer = quantized_class.from_float(module)
             
+            # Move to device if specified
+            if device is not None:
+                quantized_layer = quantized_layer.to(device)
+            
             # Replace
             setattr(model, name, quantized_layer)
         else:
             # Recurse
-            replace_linear_layers(module, target_class, quantized_class, allowed_names, ignored_names)
+            replace_linear_layers(module, target_class, quantized_class, allowed_names, ignored_names, device)
 
 def get_named_linears(model):
     """
